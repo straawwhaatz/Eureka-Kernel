@@ -1,261 +1,119 @@
-name: BPF Backport — A30 R15-Next from R24U
+name: BPF Backport — R15-Next from R24U
 
 on:
   workflow_dispatch:
-    inputs:
-      push_branch:
-        description: "Push result to fork branch R15-Next-bpf"
-        type: boolean
-        default: true
-      build_kernel:
-        description: "Build kernel after backport to verify compilation"
-        type: boolean
-        default: true
-
-env:
-  KERNEL_REPO: Roynas-Android-Playground/kernel_samsung_universal7885
-  BASE_BRANCH: R15-Next
-  SOURCE_BRANCH: R24U
-  DEFCONFIG: exynos7885-a30_defconfig
-  ARCH: arm64
-  CLANG_VERSION: "14"
 
 jobs:
-  backport-and-build:
-    runs-on: ubuntu-22.04
+  backport:
+    runs-on: ubuntu-latest
 
     steps:
-      
-      - name: Checkout ${{ env.BASE_BRANCH }}
+      - name: Checkout R15-Next
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.KERNEL_REPO }}
-          ref: ${{ env.BASE_BRANCH }}
+          repository: straawwhaatz/Eureka-Kernel
+          ref: R15-Next
           fetch-depth: 0
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      
-      - name: Fetch ${{ env.SOURCE_BRANCH }}
-        run: |
-          git fetch origin ${{ env.SOURCE_BRANCH }}
-          echo "R15-Next HEAD: $(git rev-parse --short HEAD)"
-          echo "R24U HEAD:     $(git rev-parse --short origin/${{ env.SOURCE_BRANCH }})"
+      - name: Fetch R24U
+        run: git fetch origin R24U
 
-      - name: Configure Git identity
+      - name: Configure Git
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      
-      - name: Generate BPF subsystem diff
+      - name: Generate BPF diff from R24U
         run: |
-          # All files that make up the real eBPF subsystem
-          BPF_PATHS=(
-            "kernel/bpf/"
-            "kernel/cgroup_bpf.c"
-            "include/linux/bpf.h"
-            "include/linux/bpf-cgroup.h"
-            "include/linux/bpf_types.h"
-            "include/linux/filter.h"
-            "include/uapi/linux/bpf.h"
-            "include/uapi/linux/bpf_common.h"
-            "include/uapi/linux/bpf_perf_event.h"
-            "net/core/filter.c"
-            "arch/arm64/net/"
-            "lib/test_bpf.c"
-          )
-
-          git diff HEAD..origin/${{ env.SOURCE_BRANCH }} \
-            -- "${BPF_PATHS[@]}" \
+          git diff HEAD..origin/R24U \
+            -- \
+            kernel/bpf/ \
+            kernel/cgroup_bpf.c \
+            include/linux/bpf.h \
+            include/linux/bpf-cgroup.h \
+            include/linux/bpf_types.h \
+            include/linux/filter.h \
+            include/uapi/linux/bpf.h \
+            include/uapi/linux/bpf_common.h \
+            include/uapi/linux/bpf_perf_event.h \
+            net/core/filter.c \
+            arch/arm64/net/ \
             > bpf_backport.diff
 
-          echo "=== BPF diff summary ==="
-          git diff HEAD..origin/${{ env.SOURCE_BRANCH }} --stat \
-            -- "${BPF_PATHS[@]}"
+          echo "=== Diff stats ==="
+          git diff HEAD..origin/R24U --stat \
+            -- kernel/bpf/ kernel/cgroup_bpf.c \
+               include/linux/bpf*.h \
+               include/uapi/linux/bpf*.h \
+               net/core/filter.c \
+               arch/arm64/net/
 
           LINES=$(wc -l < bpf_backport.diff)
-          echo "Total diff lines: $LINES"
+          echo "Diff size: $LINES lines"
           if [ "$LINES" -eq 0 ]; then
-            echo "No BPF differences found between branches."
+            echo "ERROR: No BPF differences found between branches."
             exit 1
           fi
 
-      
       - name: Apply BPF diff
         run: |
-          echo "Applying BPF backport patch..."
-          
           if git apply --3way --whitespace=nowarn bpf_backport.diff; then
-            echo "Patch applied cleanly."
+            echo "Applied cleanly."
           else
-            echo "Conflicts detected — resolving by preferring R24U's BPF files..."
-            # For genuine BPF subsystem files, R24U is always the right source
+            echo "Conflicts found — taking R24U version for conflicted BPF files..."
             git diff --name-only --diff-filter=U | while read f; do
-              echo "  Conflict in: $f — taking R24U version"
-              git checkout origin/${{ env.SOURCE_BRANCH }} -- "$f"
+              echo "  Resolving: $f"
+              git checkout origin/R24U -- "$f"
             done
             git add -A
           fi
-          
-          git status --short
 
-      
-      - name: Update defconfig with BPF options
+      - name: Update defconfig
         run: |
-          DCONF="arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG }}"
+          DCONF="arch/arm64/configs/exynos7885-a30_defconfig"
 
           set_config() {
-            local key=$1
-            local val=$2
-            # Remove stale entries for this key
-            sed -i "/^${key}[= ]/d" "$DCONF"
-            sed -i "/^# ${key} is not set/d" "$DCONF"
-            echo "${key}=${val}" >> "$DCONF"
-            echo "  SET $key=$val"
+            sed -i "/^${1}[= ]/d" "$DCONF"
+            sed -i "/^# ${1} is not set/d" "$DCONF"
+            echo "${1}=${2}" >> "$DCONF"
+            echo "  SET ${1}=${2}"
           }
 
           echo "=== Updating $DCONF ==="
+          set_config CONFIG_BPF               y
+          set_config CONFIG_BPF_SYSCALL        y
+          set_config CONFIG_BPF_JIT            y
+          set_config CONFIG_HAVE_BPF_JIT       y
+          set_config CONFIG_HAVE_EBPF_JIT      y
+          set_config CONFIG_BPF_JIT_ALWAYS_ON  y
+          set_config CONFIG_CGROUP_BPF         y
+          set_config CONFIG_BPF_EVENTS         y
+          set_config CONFIG_NET_CLS_BPF        y
+          set_config CONFIG_NET_ACT_BPF        y
 
-          # Core eBPF subsystem
-          set_config CONFIG_BPF            y
-          set_config CONFIG_BPF_SYSCALL    y
-
-          # JIT compiler for ARM64 (faster BPF program execution)
-          set_config CONFIG_BPF_JIT        y
-          set_config CONFIG_HAVE_BPF_JIT   y
-          set_config CONFIG_HAVE_EBPF_JIT  y
-          # Force JIT — avoids interpreter for security + perf
-          set_config CONFIG_BPF_JIT_ALWAYS_ON y
-
-          # cgroup BPF — REQUIRED for per-app network policy (Android 10+)
-          set_config CONFIG_CGROUP_BPF     y
-
-          # BPF perf events — needed by bpfloader for tracing programs
-          set_config CONFIG_BPF_EVENTS     y
-
-          # Traffic classifier/action BPF programs
-          # (used by Android's trafficController)
-          set_config CONFIG_NET_CLS_BPF    y
-          set_config CONFIG_NET_ACT_BPF    y
-
-          echo "=== BPF section in defconfig ==="
-          grep -E "^(CONFIG_BPF|CONFIG_CGROUP_BPF|CONFIG_HAVE_EBPF)" "$DCONF"
-
-      
-      - name: Commit BPF backport
+      - name: Commit and push R15-Next-bpf
         run: |
           git add -A
-          
-          # Check if there's anything to commit
-          if git diff --cached --quiet; then
-            echo "Nothing to commit — BPF may already be up to date."
-          else
-            git commit -m "bpf: backport real eBPF subsystem from R24U (Android 15+)
+          git commit -m "bpf: backport eBPF subsystem from R24U
 
-          Sync the full eBPF subsystem from R24U into R15-Next so
-          Android 13/14 bpfloader functions correctly.
+          Sync real eBPF subsystem from R24U (Android 15+) into R15-Next.
 
           Enables:
-          - CONFIG_BPF_SYSCALL: bpf() syscall for bpfloader
-          - CONFIG_CGROUP_BPF:  per-app network policy & firewall
-          - CONFIG_BPF_JIT:     ARM64 BPF JIT compiler
-          - CONFIG_BPF_EVENTS:  BPF perf event programs
-          - CONFIG_NET_CLS_BPF / NET_ACT_BPF: tc BPF hooks
+          - CONFIG_BPF_SYSCALL
+          - CONFIG_CGROUP_BPF
+          - CONFIG_BPF_JIT (ARM64)
+          - CONFIG_BPF_EVENTS
+          - CONFIG_NET_CLS_BPF / NET_ACT_BPF
 
-          BPF map types carried over:
-          hash, array, prog_array, perf_event_array,
-          percpu_hash, percpu_array, stack_trace, cgroup_array
+          Source: R24U @ $(git rev-parse --short origin/R24U)
+          Base:   R15-Next @ $(git rev-parse --short HEAD~1)"
 
-          BPF prog types carried over:
-          socket_filter, kprobe, sched_cls, sched_act,
-          cgroup_skb, cgroup_sock, lwt_*
+          git push origin HEAD:R15-Next-bpf --force
+          echo "Done. New branch: straawwhaatz/Eureka-Kernel:R15-Next-bpf"
 
-          Backported from: $(git rev-parse --short origin/${{ env.SOURCE_BRANCH }})
-          Base branch:     ${{ env.BASE_BRANCH }}"
-          fi
-
-      
-      - name: Upload BPF patch artifact
+      - name: Upload diff artifact
         uses: actions/upload-artifact@v4
         with:
           name: bpf-backport-diff
           path: bpf_backport.diff
-
-      
-      - name: Install build dependencies
-        if: ${{ inputs.build_kernel == true }}
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            bc bison flex libssl-dev libelf-dev \
-            python3 python3-pip zip unzip \
-            ccache make
-
-      - name: Download ZYC Clang ${{ env.CLANG_VERSION }}
-        if: ${{ inputs.build_kernel == true }}
-        run: |
-          mkdir -p $HOME/clang
-          # ZYC Clang 14 — same toolchain from your existing kernel workflow
-          ZYC_URL="https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20220825-release/Clang-14.0.6-20220825.tar.gz"
-          wget -q --show-progress "$ZYC_URL" -O clang.tar.gz
-          tar -xzf clang.tar.gz -C $HOME/clang
-          echo "Clang version: $($HOME/clang/bin/clang --version | head -1)"
-
-      - name: Build kernel
-        if: ${{ inputs.build_kernel == true }}
-        run: |
-          export CLANG_PATH=$HOME/clang/bin
-          export PATH="$CLANG_PATH:$PATH"
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-          MAKE_ARGS=(
-            O=out
-            ARCH=${{ env.ARCH }}
-            CC=clang
-            CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=$CROSS_COMPILE
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
-            -j$(nproc --all)
-          )
-
-          # Generate .config from defconfig
-          echo "=== Generating .config ==="
-          make "${MAKE_ARGS[@]}" ${{ env.DEFCONFIG }}
-
-          # Verify BPF is enabled in final config
-          echo "=== BPF config check ==="
-          grep -E "CONFIG_(BPF|CGROUP_BPF|HAVE_EBPF)" out/.config || \
-            echo "WARNING: BPF configs not found in .config!"
-
-          # Build — errors here mean BPF backport has compile issues
-          echo "=== Building ==="
-          make "${MAKE_ARGS[@]}" 2>&1 | tee build.log
-
-          # Check for BPF-specific errors
-          if grep -qE "error:.*bpf|bpf.*error:" build.log; then
-            echo "BPF-related compile errors found:"
-            grep -E "error:.*bpf|bpf.*error:" build.log
-            exit 1
-          fi
-
-          echo "=== Build result ==="
-          ls -lh out/arch/${{ env.ARCH }}/boot/Image.gz-dtb 2>/dev/null || \
-          ls -lh out/arch/${{ env.ARCH }}/boot/Image.gz     2>/dev/null || \
-            echo "Image not found — check build.log artifact"
-
-      - name: Upload build log
-        if: ${{ inputs.build_kernel == true }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-
-      # ── 9. (Optional) Push to your fork ──────────────────────────────────
-      - name: Push backported branch to fork
-        if: ${{ inputs.push_branch == true }}
-        run: |
-          git remote add fork \
-            https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository_owner }}/kernel_samsung_universal7885.git
-          git push fork HEAD:R15-Next-bpf-backport --force
-          echo "Pushed to: ${{ github.repository_owner }}/kernel_samsung_universal7885:R15-Next-bpf-backport"
